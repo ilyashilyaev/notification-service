@@ -1,0 +1,27 @@
+version: "2"
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - revive
+    - gocritic
+    - unconvert
+    - misspell
+    - bodyclose
+    - unparam
+
+  settings:
+    revive:
+      rules:
+        - name: exported
+          disabled: true
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+formatters:
+  enable:
+    - gofmt
