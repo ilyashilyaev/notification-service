@@ -2,8 +2,9 @@
 
 # Адрес HTTP-сервера и строка подключения к БД.
 # Значения по умолчанию совпадают с docker-compose.yml.
-HTTP_ADDR    ?= :8080
-DATABASE_URL ?= postgres://notif:notif@localhost:5432/notifications?sslmode=disable
+HTTP_ADDR      ?= :8080
+DATABASE_URL   ?= postgres://notif:notif@localhost:5433/notifications?sslmode=disable
+MIGRATIONS_DIR ?= migrations
 
 .PHONY: help
 help: ## Показать список команд
@@ -24,6 +25,18 @@ db-down: ## Остановить PostgreSQL
 .PHONY: run
 run: db-up ## Поднять базу и запустить сервер
 	HTTP_ADDR=$(HTTP_ADDR) DATABASE_URL=$(DATABASE_URL) go run ./cmd/notification-service
+
+.PHONY: migrate-up
+migrate-up: ## Накатить миграции (нужен golang-migrate: brew install golang-migrate)
+	migrate -path $(MIGRATIONS_DIR) -database "$(DATABASE_URL)" up
+
+.PHONY: migrate-down
+migrate-down: ## Откатить последнюю миграцию
+	migrate -path $(MIGRATIONS_DIR) -database "$(DATABASE_URL)" down 1
+
+.PHONY: migrate-create
+migrate-create: ## Новая миграция: make migrate-create name=add_x
+	migrate create -ext sql -dir $(MIGRATIONS_DIR) -seq $(name)
 
 .PHONY: build
 build: ## Собрать бинарник в ./bin
