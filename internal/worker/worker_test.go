@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -26,6 +27,21 @@ type failChannel struct{ name string }
 
 func (c failChannel) Name() string                                     { return c.name }
 func (c failChannel) Send(context.Context, storage.Notification) error { return errors.New("boom") }
+
+// flakyChannel падает первые failFirst раз, затем успешно. atomic — Send зовут из пула.
+type flakyChannel struct {
+	name      string
+	failFirst int32
+	calls     int32
+}
+
+func (c *flakyChannel) Name() string { return c.name }
+func (c *flakyChannel) Send(context.Context, storage.Notification) error {
+	if atomic.AddInt32(&c.calls, 1) <= c.failFirst {
+		return errors.New("temporary")
+	}
+	return nil
+}
 
 func testDB(t *testing.T) (*storage.Repo, *pgxpool.Pool) {
 	t.Helper()
@@ -100,5 +116,52 @@ func TestWorkerDrainsToTerminal(t *testing.T) {
 	}
 	if failed != 1 {
 		t.Errorf("failed = %d, want 1 (push после %d попыток)", failed, 3)
+	}
+}
+
+// Канал, падающий первые 2 раза, на 3-й должен довести уведомление до sent.
+func TestWorkerRetriesThenSucceeds(t *testing.T) {
+	repo, pool := testDB(t)
+	bg := context.Background()
+
+	ev, err := repo.CreateEvent(bg, storage.Event{Type: "order.created", Payload: []byte(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.CreateNotification(bg, storage.Notification{EventID: ev.ID, Channel: "email"}); err != nil {
+		t.Fatal(err)
+	}
+
+	w := New(repo,
+		[]notify.Channel{&flakyChannel{name: "email", failFirst: 2}},
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Config{PoolSize: 1, BatchSize: 5, PollEvery: 10 * time.Millisecond, MaxAttempts: 5, BaseBackoff: 5 * time.Millisecond},
+	)
+
+	ctx, cancel := context.WithCancel(bg)
+	done := make(chan error, 1)
+	go func() { done <- w.Run(ctx) }()
+
+	deadline := time.Now().Add(3 * time.Second)
+	var status string
+	var attempts int
+	for {
+		if time.Now().After(deadline) {
+			cancel()
+			<-done
+			t.Fatalf("не дошло до sent: status=%q attempts=%d", status, attempts)
+		}
+		_ = pool.QueryRow(bg, "SELECT status, attempts FROM notifications WHERE event_id=$1", ev.ID).
+			Scan(&status, &attempts)
+		if status == "sent" {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	cancel()
+	<-done
+
+	if attempts < 3 {
+		t.Errorf("attempts = %d, want >= 3 (2 провала + успех)", attempts)
 	}
 }
