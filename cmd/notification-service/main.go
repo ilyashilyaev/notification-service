@@ -12,10 +12,13 @@ import (
 	"os/signal"
 	"syscall"
 
+	"golang.org/x/sync/errgroup"
+
 	"github.com/ilyashilyaev/notification-service/internal/notify"
 	"github.com/ilyashilyaev/notification-service/internal/postgres"
 	"github.com/ilyashilyaev/notification-service/internal/server"
 	"github.com/ilyashilyaev/notification-service/internal/storage"
+	"github.com/ilyashilyaev/notification-service/internal/worker"
 )
 
 func main() {
@@ -53,5 +56,13 @@ func run(logger *slog.Logger) error {
 		notify.NewPushChannel(logger),
 	}
 
-	return server.New(addr, logger, repo, channels).Run(ctx)
+	srv := server.New(addr, logger, repo, channels)
+	wrk := worker.New(repo, channels, logger, worker.Config{})
+
+	// errgroup: оба компонента живут, пока жив gctx; падение или отмена одного
+	// отменяет gctx -> второй тоже корректно останавливается. g.Wait ждёт обоих.
+	g, gctx := errgroup.WithContext(ctx)
+	g.Go(func() error { return srv.Run(gctx) })
+	g.Go(func() error { return wrk.Run(gctx) })
+	return g.Wait()
 }

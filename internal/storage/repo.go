@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -46,4 +47,66 @@ func (r *Repo) GetNotification(ctx context.Context, id int64) (Notification, err
 										WHERE id = $1`, id).Scan(&n.ID, &n.EventID, &n.Channel, &n.Status, &n.Attempts,
 		&n.NextAttemptAt, &n.LastError, &n.CreatedAt, &n.UpdatedAt)
 	return n, err
+}
+
+// ClaimDue атомарно забирает до limit готовых к отправке pending-уведомлений,
+// увеличивает attempts и отодвигает next_attempt_at на lease вперёд (visibility
+// timeout). SKIP LOCKED во вложенном SELECT даёт нескольким воркерам брать разные
+// строки без блокировки друг друга. Lease закрывает окно между захватом и финальным
+// MarkSent/Mark*: пока строка в обработке, её next_attempt_at в будущем, так что
+// другая горутина её не подхватит. Если воркер упадёт, не доведя строку, через lease
+// она снова станет видимой — это и есть восстановление (at-least-once доставка).
+func (r *Repo) ClaimDue(ctx context.Context, limit int) ([]Notification, error) {
+	rows, err := r.pool.Query(ctx, `
+		UPDATE notifications
+		SET attempts = attempts + 1,
+		    next_attempt_at = now() + interval '1 minute',
+		    updated_at = now()
+		WHERE id IN (
+			SELECT id FROM notifications
+			WHERE status = 'pending' AND next_attempt_at <= now()
+			ORDER BY next_attempt_at
+			FOR UPDATE SKIP LOCKED
+			LIMIT $1
+		)
+		RETURNING id, event_id, channel, status, attempts, next_attempt_at,
+		          COALESCE(last_error, ''), created_at, updated_at`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []Notification
+	for rows.Next() {
+		var n Notification
+		if err := rows.Scan(&n.ID, &n.EventID, &n.Channel, &n.Status, &n.Attempts,
+			&n.NextAttemptAt, &n.LastError, &n.CreatedAt, &n.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, n)
+	}
+	return out, rows.Err()
+}
+
+// MarkSent помечает уведомление отправленным.
+func (r *Repo) MarkSent(ctx context.Context, id int64) error {
+	_, err := r.pool.Exec(ctx,
+		`UPDATE notifications SET status = 'sent', updated_at = now() WHERE id = $1`, id)
+	return err
+}
+
+// MarkRetry откладывает следующую попытку (status остаётся pending).
+func (r *Repo) MarkRetry(ctx context.Context, id int64, next time.Time, lastErr string) error {
+	_, err := r.pool.Exec(ctx,
+		`UPDATE notifications SET next_attempt_at = $2, last_error = $3, updated_at = now()
+		 WHERE id = $1`, id, next, lastErr)
+	return err
+}
+
+// MarkFailed помечает уведомление окончательно неуспешным.
+func (r *Repo) MarkFailed(ctx context.Context, id int64, lastErr string) error {
+	_, err := r.pool.Exec(ctx,
+		`UPDATE notifications SET status = 'failed', last_error = $2, updated_at = now()
+		 WHERE id = $1`, id, lastErr)
+	return err
 }
