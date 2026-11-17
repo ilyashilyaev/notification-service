@@ -43,8 +43,8 @@ build: ## Собрать бинарник в ./bin
 	go build -o bin/notification-service ./cmd/notification-service
 
 .PHONY: test
-test: ## Прогнать тесты с гонками
-	go test -race ./...
+test: ## Прогнать тесты с гонками (-p 1: интеграционные тесты делят одну БД)
+	go test -race -p 1 ./...
 
 .PHONY: fmt
 fmt: ## gofmt
