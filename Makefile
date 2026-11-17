@@ -5,6 +5,8 @@
 HTTP_ADDR      ?= :8080
 DATABASE_URL   ?= postgres://notif:notif@localhost:5433/notifications?sslmode=disable
 MIGRATIONS_DIR ?= migrations
+KAFKA_BROKERS  ?= localhost:9092
+KAFKA_TOPIC    ?= order.events
 
 .PHONY: help
 help: ## Показать список команд
@@ -22,9 +24,27 @@ db-up: ## Поднять PostgreSQL в docker и дождаться готовн
 db-down: ## Остановить PostgreSQL
 	docker compose down
 
+.PHONY: kafka-up
+kafka-up: ## Поднять Kafka в docker и дождаться готовности
+	docker compose up -d kafka
+	@echo "ждём, пока Kafka примет подключения..."
+	@until docker compose exec -T kafka /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1; do sleep 1; done
+	@echo "Kafka готова"
+
+.PHONY: kafka-topic
+kafka-topic: ## Создать топик order-событий (идемпотентно)
+	docker compose exec -T kafka /opt/kafka/bin/kafka-topics.sh \
+		--bootstrap-server localhost:9092 --create --if-not-exists \
+		--topic $(KAFKA_TOPIC) --partitions 3 --replication-factor 1
+
+.PHONY: infra-up
+infra-up: db-up kafka-up kafka-topic ## Поднять базу и Kafka, создать топик
+
 .PHONY: run
-run: db-up ## Поднять базу и запустить сервер
-	HTTP_ADDR=$(HTTP_ADDR) DATABASE_URL=$(DATABASE_URL) go run ./cmd/notification-service
+run: infra-up ## Поднять инфру и запустить сервер
+	HTTP_ADDR=$(HTTP_ADDR) DATABASE_URL=$(DATABASE_URL) \
+	KAFKA_BROKERS=$(KAFKA_BROKERS) KAFKA_TOPIC=$(KAFKA_TOPIC) \
+	go run ./cmd/notification-service
 
 .PHONY: migrate-up
 migrate-up: ## Накатить миграции (нужен golang-migrate: brew install golang-migrate)

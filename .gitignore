@@ -15,6 +15,9 @@ coverage.*
 # Данные Postgres из docker-compose
 /pgdata/
 
+# Данные Kafka из docker-compose
+/kafkadata/
+
 # IDE
 .idea/
 .vscode/
