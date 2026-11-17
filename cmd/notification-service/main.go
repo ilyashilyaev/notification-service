@@ -14,6 +14,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/ilyashilyaev/notification-service/internal/events"
 	"github.com/ilyashilyaev/notification-service/internal/notify"
 	"github.com/ilyashilyaev/notification-service/internal/postgres"
 	"github.com/ilyashilyaev/notification-service/internal/server"
@@ -56,13 +57,28 @@ func run(logger *slog.Logger) error {
 		notify.NewPushChannel(logger),
 	}
 
+	// Kafka-консьюмер читает те же order-события, что и HTTP POST /events.
+	kcfg := events.ConfigFromEnv()
+	kclient, err := events.NewConsumerClient(ctx, kcfg)
+	if err != nil {
+		return fmt.Errorf("connect kafka: %w", err)
+	}
+	defer kclient.Close()
+
+	channelNames := make([]string, len(channels))
+	for i, ch := range channels {
+		channelNames[i] = ch.Name()
+	}
+
 	srv := server.New(addr, logger, repo, channels)
 	wrk := worker.New(repo, channels, logger, worker.Config{})
+	consumer := events.NewConsumer(kclient, repo, channelNames, logger)
 
-	// errgroup: оба компонента живут, пока жив gctx; падение или отмена одного
-	// отменяет gctx -> второй тоже корректно останавливается. g.Wait ждёт обоих.
+	// errgroup: все компоненты живут, пока жив gctx; падение или отмена одного
+	// отменяет gctx -> остальные тоже корректно останавливаются. g.Wait ждёт всех.
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error { return srv.Run(gctx) })
 	g.Go(func() error { return wrk.Run(gctx) })
+	g.Go(func() error { return consumer.Run(gctx) })
 	return g.Wait()
 }
