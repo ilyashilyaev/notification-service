@@ -3,6 +3,7 @@ package events
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -30,7 +31,7 @@ func (c *Consumer) Run(ctx context.Context) error {
 	c.log.Info("kafka consumer started", "channels", c.channels)
 
 	for {
-		// Штатная остановка по отмене ctx.
+		// Штатная остановка по отмене ctx (как Worker.Run).
 		select {
 		case <-ctx.Done():
 			return nil
@@ -40,7 +41,11 @@ func (c *Consumer) Run(ctx context.Context) error {
 		// PollFetches блокируется, пока не придут записи или не отменят ctx.
 		fetches := c.client.PollFetches(ctx)
 
+		// Ошибки fetch разбираем до записей: отмена ctx -> штатный выход, иначе лог.
 		if errs := fetches.Errors(); len(errs) > 0 {
+			if ctx.Err() != nil {
+				return nil
+			}
 			for _, err := range errs {
 				c.log.Error("kafka fetches failed", "err", err)
 			}
@@ -52,40 +57,38 @@ func (c *Consumer) Run(ctx context.Context) error {
 			}
 		})
 
-		// Коммит оффсетов ПОСЛЕ handle — иначе падение между коммитом и записью
-		// в БД потеряет сообщение.
+		// Коммит оффсетов ПОСЛЕ handle: падение между коммитом и записью в БД
+		// потеряло бы сообщение. При повторной доставке спасает дедуп по event_id.
 		if err := c.client.CommitUncommittedOffsets(ctx); err != nil {
 			c.log.Error("failed to commit uncommitted offsets", "err", err)
 		}
 	}
 }
 
-// handle декодирует одну запись и создаёт по ней event + уведомления.
+// handle декодирует одну запись и через IngestEvent идемпотентно создаёт по ней
+// event + уведомления. Битый JSON пропускаем (лог + nil, иначе "ядовитое"
+// сообщение перечитается навсегда); сбой БД возвращаем (оффсет не коммитим,
+// перечитаем позже — дедуп по event_id не даст дублей).
 func (c *Consumer) handle(ctx context.Context, rec *kgo.Record) error {
 	var oe OrderEvent
-	err := json.Unmarshal(rec.Value, &oe)
-	if err != nil {
-		c.log.Error("failed to unmarshal record", "err", err)
+	if err := json.Unmarshal(rec.Value, &oe); err != nil {
+		c.log.Error("failed to unmarshal record, skipping", "err", err)
 		return nil
 	}
-	if oe.Type == "" {
-		c.log.Error("empty event type, skipping")
+	if oe.EventID == "" || oe.Type == "" {
+		c.log.Error("record missing event_id or type, skipping",
+			"event_id", oe.EventID, "type", oe.Type)
 		return nil
 	}
-	ev, err := c.repo.CreateEvent(ctx, storage.Event{Type: oe.Type, Payload: oe.Payload})
+	_, _, created, err := c.repo.IngestEvent(ctx,
+		storage.Event{ExternalID: oe.EventID, Type: oe.Type, Payload: oe.Payload},
+		c.channels,
+	)
 	if err != nil {
-		c.log.Error("failed to create event", "err", err)
-		return err
+		return fmt.Errorf("ingest event %s: %w", oe.EventID, err)
 	}
-	for _, ch := range c.channels {
-		_, err := c.repo.CreateNotification(ctx, storage.Notification{
-			EventID: ev.ID,
-			Channel: ch,
-		})
-		if err != nil {
-			c.log.Error("failed to create notification", "err", err)
-			return err
-		}
+	if !created {
+		c.log.Info("duplicate event skipped", "event_id", oe.EventID)
 	}
 	return nil
 }

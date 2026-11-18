@@ -2,8 +2,10 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -17,13 +19,62 @@ func NewRepo(pool *pgxpool.Pool) *Repo {
 }
 
 // CreateEvent вставляет событие и возвращает его с присвоенными id и created_at.
+// Используется в тестах для посева; боевой путь приёма — IngestEvent (с дедупом).
 func (r *Repo) CreateEvent(ctx context.Context, e Event) (Event, error) {
 	err := r.pool.QueryRow(ctx,
-		`INSERT INTO events (type, payload) VALUES ($1, $2)
+		`INSERT INTO events (external_id, type, payload) VALUES ($1, $2, $3)
 		     RETURNING id, created_at`,
-		e.Type, e.Payload,
+		e.ExternalID, e.Type, e.Payload,
 	).Scan(&e.ID, &e.CreatedAt)
 	return e, err
+}
+
+// IngestEvent атомарно сохраняет событие и создаёт по одному pending-уведомлению
+// на каждый канал — в ОДНОЙ транзакции. Дедуп по external_id: если событие с таким
+// id уже есть, ничего не вставляет и возвращает created=false (идемпотентность —
+// повторная доставка из Kafka не плодит дублей). created=true -> в возврате лежат
+// заполненное событие и его уведомления.
+func (r *Repo) IngestEvent(ctx context.Context, e Event, channels []string) (Event, []Notification, bool, error) {
+	var notes []Notification
+	// Транзакция: событие и все его уведомления появляются атомарно (или ничего).
+	// defer Rollback безопасен — после Commit он станет no-op (идиома pgx).
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return Event{}, nil, false, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Вставка с дедупом: при конфликте по external_id строка не вставляется,
+	// RETURNING ничего не отдаёт -> Scan возвращает pgx.ErrNoRows = это дубль.
+	err = tx.QueryRow(ctx, "INSERT INTO events (external_id, type, payload) VALUES ($1,$2,$3)"+
+		" ON CONFLICT (external_id) DO NOTHING  RETURNING id, created_at",
+		e.ExternalID, e.Type, e.Payload).Scan(&e.ID, &e.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Event{}, nil, false, nil // дубль — идемпотентно пропускаем
+	}
+	if err != nil {
+		return Event{}, nil, false, err
+	}
+
+	// По одному pending-уведомлению на канал — в той же транзакции (event_id = FK e.ID).
+	for _, channel := range channels {
+		var n Notification
+		err = tx.QueryRow(ctx, `INSERT INTO notifications (event_id, channel) VALUES ($1,$2)
+        RETURNING id, status, attempts, next_attempt_at, created_at, updated_at`,
+			e.ID, channel).Scan(&n.ID, &n.Status, &n.Attempts, &n.NextAttemptAt, &n.CreatedAt, &n.UpdatedAt)
+		if err != nil {
+			return Event{}, nil, false, err
+		}
+		n.EventID = e.ID
+		n.Channel = channel
+		notes = append(notes, n)
+	}
+
+	err = tx.Commit(ctx)
+	if err != nil {
+		return Event{}, nil, false, err
+	}
+	return e, notes, true, nil
 }
 
 // CreateNotification вставляет уведомление. status/attempts/next_attempt_at

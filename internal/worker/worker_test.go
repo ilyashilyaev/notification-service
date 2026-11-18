@@ -66,7 +66,7 @@ func TestWorkerDrainsToTerminal(t *testing.T) {
 	repo, pool := testDB(t)
 	bg := context.Background()
 
-	ev, err := repo.CreateEvent(bg, storage.Event{Type: "order.created", Payload: []byte(`{}`)})
+	ev, err := repo.CreateEvent(bg, storage.Event{ExternalID: "evt-1", Type: "order.created", Payload: []byte(`{}`)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +124,7 @@ func TestWorkerRetriesThenSucceeds(t *testing.T) {
 	repo, pool := testDB(t)
 	bg := context.Background()
 
-	ev, err := repo.CreateEvent(bg, storage.Event{Type: "order.created", Payload: []byte(`{}`)})
+	ev, err := repo.CreateEvent(bg, storage.Event{ExternalID: "evt-1", Type: "order.created", Payload: []byte(`{}`)})
 	if err != nil {
 		t.Fatal(err)
 	}

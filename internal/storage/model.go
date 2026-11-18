@@ -14,10 +14,11 @@ const (
 
 // Event — событие заказа.
 type Event struct {
-	ID        int64
-	Type      string
-	Payload   []byte // jsonb
-	CreatedAt time.Time
+	ID         int64
+	ExternalID string // event_id отправителя; ключ дедупа (UNIQUE в схеме)
+	Type       string
+	Payload    []byte // jsonb
+	CreatedAt  time.Time
 }
 
 // Notification — уведомление, порождённое событием.

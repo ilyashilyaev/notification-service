@@ -58,30 +58,45 @@ func realServer(t *testing.T) (*Server, *pgxpool.Pool) {
 }
 
 // POST /events создаёт событие и по уведомлению на каждый канал (email + push => 2).
+// Повтор того же event_id идемпотентен: 200 duplicate, в базе ничего не прибавляется.
 func TestCreateEvent(t *testing.T) {
 	srv, pool := realServer(t)
+	ctx := context.Background()
 
-	body := `{"type":"order.created","payload":{"order_id":42}}`
-	req := httptest.NewRequest(http.MethodPost, "/events", strings.NewReader(body))
-	rec := httptest.NewRecorder()
-	srv.routes().ServeHTTP(rec, req)
+	body := `{"event_id":"evt-1","type":"order.created","payload":{"order_id":42}}`
+	post := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/events", strings.NewReader(body))
+		rec := httptest.NewRecorder()
+		srv.routes().ServeHTTP(rec, req)
+		return rec
+	}
 
-	if rec.Code != http.StatusCreated {
+	// Первый раз — создаётся (201).
+	if rec := post(); rec.Code != http.StatusCreated {
 		t.Fatalf("POST /events = %d, want 201 (body: %s)", rec.Code, rec.Body)
 	}
 
-	var events, notifications int
-	ctx := context.Background()
-	if err := pool.QueryRow(ctx, "SELECT count(*) FROM events").Scan(&events); err != nil {
-		t.Fatal(err)
+	assertCounts := func(wantEvents, wantNotes int) {
+		t.Helper()
+		var events, notifications int
+		if err := pool.QueryRow(ctx, "SELECT count(*) FROM events").Scan(&events); err != nil {
+			t.Fatal(err)
+		}
+		if err := pool.QueryRow(ctx, "SELECT count(*) FROM notifications").Scan(&notifications); err != nil {
+			t.Fatal(err)
+		}
+		if events != wantEvents {
+			t.Errorf("events в базе = %d, want %d", events, wantEvents)
+		}
+		if notifications != wantNotes {
+			t.Errorf("notifications в базе = %d, want %d (email+push)", notifications, wantNotes)
+		}
 	}
-	if err := pool.QueryRow(ctx, "SELECT count(*) FROM notifications").Scan(&notifications); err != nil {
-		t.Fatal(err)
+	assertCounts(1, 2)
+
+	// Повтор того же event_id — дедуп: 200, счётчики не меняются.
+	if rec := post(); rec.Code != http.StatusOK {
+		t.Fatalf("повтор POST /events = %d, want 200 duplicate (body: %s)", rec.Code, rec.Body)
 	}
-	if events != 1 {
-		t.Errorf("events в базе = %d, want 1", events)
-	}
-	if notifications != 2 {
-		t.Errorf("notifications в базе = %d, want 2 (email+push)", notifications)
-	}
+	assertCounts(1, 2)
 }

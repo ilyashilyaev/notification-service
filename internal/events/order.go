@@ -5,9 +5,10 @@ import "encoding/json"
 // OrderEvent — формат сообщения в топике order.events: что присылает сервис
 // заказов. Payload пробрасывается в уведомления как есть (jsonb).
 //
-// Ключ дедупликации (event_id) добавим на Вечере 3 — вместе со схемой,
-// unique-ограничением и идемпотентной вставкой в одной транзакции.
+// EventID — уникальный id события у отправителя; ключ дедупликации. Повторная
+// доставка того же EventID (at-least-once в Kafka) не плодит дублей.
 type OrderEvent struct {
+	EventID string          `json:"event_id"`
 	Type    string          `json:"type"`
 	Payload json.RawMessage `json:"payload"`
 }
