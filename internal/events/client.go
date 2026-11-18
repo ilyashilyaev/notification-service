@@ -31,3 +31,20 @@ func NewConsumerClient(ctx context.Context, cfg Config) (*kgo.Client, error) {
 	}
 	return cl, nil
 }
+
+// NewProducerClient создаёт клиента franz-go только для публикации (outbox relay):
+// без consumer group. По умолчанию franz-go — идемпотентный продьюсер с acks=all,
+// так что повтор публикации после сбоя не теряет и не дублирует на стороне брокера.
+func NewProducerClient(ctx context.Context, cfg Config) (*kgo.Client, error) {
+	cl, err := kgo.NewClient(
+		kgo.SeedBrokers(cfg.Brokers...),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("new kafka producer: %w", err)
+	}
+	if err := cl.Ping(ctx); err != nil {
+		cl.Close()
+		return nil, fmt.Errorf("ping kafka producer: %w", err)
+	}
+	return cl, nil
+}

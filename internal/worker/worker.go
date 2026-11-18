@@ -19,6 +19,7 @@ type Config struct {
 	PollEvery   time.Duration // пауза, когда забирать нечего
 	MaxAttempts int           // после скольких неудач -> failed
 	BaseBackoff time.Duration // база экспоненциальной задержки
+	StatusTopic string        // топик статус-событий (пишутся в outbox при sent/failed)
 }
 
 // Worker раскладывает pending-уведомления по каналам пулом горутин.
@@ -44,6 +45,9 @@ func New(repo *storage.Repo, channels []notify.Channel, log *slog.Logger, cfg Co
 	}
 	if cfg.BaseBackoff <= 0 {
 		cfg.BaseBackoff = time.Second
+	}
+	if cfg.StatusTopic == "" {
+		cfg.StatusTopic = "notification.status"
 	}
 
 	m := make(map[string]notify.Channel, len(channels))
@@ -117,20 +121,20 @@ func (w *Worker) Run(ctx context.Context) error {
 func (w *Worker) process(ctx context.Context, n storage.Notification) {
 	ch, ok := w.channels[n.Channel]
 	if !ok {
-		if err := w.repo.MarkFailed(ctx, n.ID, "unknown channel: "+n.Channel); err != nil {
+		if err := w.repo.MarkFailed(ctx, n, "unknown channel: "+n.Channel, w.cfg.StatusTopic); err != nil {
 			w.log.Error("unknown channel", "channel", n.Channel)
 		}
 		return
 	}
 	err := ch.Send(ctx, n)
 	if err == nil {
-		if err := w.repo.MarkSent(ctx, n.ID); err != nil {
+		if err := w.repo.MarkSent(ctx, n, w.cfg.StatusTopic); err != nil {
 			w.log.Error("mark sent", "err", err)
 		}
 		return
 	}
 	if n.Attempts >= w.cfg.MaxAttempts {
-		if e := w.repo.MarkFailed(ctx, n.ID, err.Error()); e != nil {
+		if e := w.repo.MarkFailed(ctx, n, err.Error(), w.cfg.StatusTopic); e != nil {
 			w.log.Error("failed to mark failed attempt", "channel", n.Channel, "err", e)
 		}
 	} else {

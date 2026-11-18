@@ -57,7 +57,8 @@ func run(logger *slog.Logger) error {
 		notify.NewPushChannel(logger),
 	}
 
-	// Kafka-консьюмер читает те же order-события, что и HTTP POST /events.
+	// Kafka: консьюмер читает order-события (вход), продьюсер нужен relay для
+	// публикации статус-событий из outbox (выход).
 	kcfg := events.ConfigFromEnv()
 	kclient, err := events.NewConsumerClient(ctx, kcfg)
 	if err != nil {
@@ -65,14 +66,21 @@ func run(logger *slog.Logger) error {
 	}
 	defer kclient.Close()
 
+	producer, err := events.NewProducerClient(ctx, kcfg)
+	if err != nil {
+		return fmt.Errorf("connect kafka producer: %w", err)
+	}
+	defer producer.Close()
+
 	channelNames := make([]string, len(channels))
 	for i, ch := range channels {
 		channelNames[i] = ch.Name()
 	}
 
 	srv := server.New(addr, logger, repo, channels)
-	wrk := worker.New(repo, channels, logger, worker.Config{})
+	wrk := worker.New(repo, channels, logger, worker.Config{StatusTopic: kcfg.StatusTopic})
 	consumer := events.NewConsumer(kclient, repo, channelNames, logger)
+	relay := events.NewRelay(producer, repo, logger)
 
 	// errgroup: все компоненты живут, пока жив gctx; падение или отмена одного
 	// отменяет gctx -> остальные тоже корректно останавливаются. g.Wait ждёт всех.
@@ -80,5 +88,6 @@ func run(logger *slog.Logger) error {
 	g.Go(func() error { return srv.Run(gctx) })
 	g.Go(func() error { return wrk.Run(gctx) })
 	g.Go(func() error { return consumer.Run(gctx) })
+	g.Go(func() error { return relay.Run(gctx) })
 	return g.Wait()
 }

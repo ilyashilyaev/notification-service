@@ -10,13 +10,14 @@ import (
 // хранит оффсеты по группе, так что рестарт сервиса продолжает читать с места,
 // а несколько инстансов в одной группе делят партиции между собой.
 type Config struct {
-	Brokers []string // адреса брокеров, напр. ["localhost:9092"]
-	Topic   string   // топик order-событий
-	GroupID string   // consumer group
+	Brokers     []string // адреса брокеров, напр. ["localhost:9092"]
+	Topic       string   // топик order-событий (вход)
+	GroupID     string   // consumer group
+	StatusTopic string   // топик статус-событий (выход, outbox relay)
 }
 
-// ConfigFromEnv читает KAFKA_BROKERS (через запятую), KAFKA_TOPIC, KAFKA_GROUP_ID.
-// Пустые значения заменяются дефолтами из docker-compose/Makefile.
+// ConfigFromEnv читает KAFKA_BROKERS (через запятую), KAFKA_TOPIC, KAFKA_GROUP_ID,
+// KAFKA_STATUS_TOPIC. Пустые значения заменяются дефолтами из docker-compose/Makefile.
 func ConfigFromEnv() Config {
 	brokers := os.Getenv("KAFKA_BROKERS")
 	if brokers == "" {
@@ -30,9 +31,14 @@ func ConfigFromEnv() Config {
 	if group == "" {
 		group = "notification-service"
 	}
+	statusTopic := os.Getenv("KAFKA_STATUS_TOPIC")
+	if statusTopic == "" {
+		statusTopic = "notification.status"
+	}
 	return Config{
-		Brokers: strings.Split(brokers, ","),
-		Topic:   topic,
-		GroupID: group,
+		Brokers:     strings.Split(brokers, ","),
+		Topic:       topic,
+		GroupID:     group,
+		StatusTopic: statusTopic,
 	}
 }

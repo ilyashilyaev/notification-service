@@ -2,7 +2,9 @@ package storage
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -139,14 +141,65 @@ func (r *Repo) ClaimDue(ctx context.Context, limit int) ([]Notification, error) 
 	return out, rows.Err()
 }
 
-// MarkSent помечает уведомление отправленным.
-func (r *Repo) MarkSent(ctx context.Context, id int64) error {
-	_, err := r.pool.Exec(ctx,
-		`UPDATE notifications SET status = 'sent', updated_at = now() WHERE id = $1`, id)
-	return err
+// statusEvent — полезная нагрузка статус-события, которое уходит в outbox -> Kafka.
+type statusEvent struct {
+	NotificationID int64  `json:"notification_id"`
+	EventID        int64  `json:"event_id"`
+	Channel        string `json:"channel"`
+	Status         string `json:"status"`
 }
 
-// MarkRetry откладывает следующую попытку (status остаётся pending).
+// markTerminal переводит уведомление в терминальный статус (sent/failed) И пишет
+// статус-событие в outbox — в ОДНОЙ транзакции (transactional outbox): смена
+// статуса и факт «событие надо опубликовать» фиксируются атомарно. Relay потом
+// отдаст строку в Kafka. topic — куда публиковать.
+func (r *Repo) markTerminal(ctx context.Context, n Notification, status Status, lastErr, topic string) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Пустую строку ошибки пишем как NULL (last_error nullable).
+	var le *string
+	if lastErr != "" {
+		le = &lastErr
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE notifications SET status = $2, last_error = $3, updated_at = now() WHERE id = $1`,
+		n.ID, status, le); err != nil {
+		return err
+	}
+
+	payload, err := json.Marshal(statusEvent{
+		NotificationID: n.ID,
+		EventID:        n.EventID,
+		Channel:        n.Channel,
+		Status:         string(status),
+	})
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO outbox (topic, key, payload) VALUES ($1, $2, $3)`,
+		topic, strconv.FormatInt(n.EventID, 10), payload); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// MarkSent: status=sent + статус-событие в outbox (одна транзакция).
+func (r *Repo) MarkSent(ctx context.Context, n Notification, topic string) error {
+	return r.markTerminal(ctx, n, StatusSent, "", topic)
+}
+
+// MarkFailed: status=failed + статус-событие в outbox (одна транзакция).
+func (r *Repo) MarkFailed(ctx context.Context, n Notification, lastErr, topic string) error {
+	return r.markTerminal(ctx, n, StatusFailed, lastErr, topic)
+}
+
+// MarkRetry откладывает следующую попытку (status остаётся pending, не терминал —
+// статус-событие не публикуем).
 func (r *Repo) MarkRetry(ctx context.Context, id int64, next time.Time, lastErr string) error {
 	_, err := r.pool.Exec(ctx,
 		`UPDATE notifications SET next_attempt_at = $2, last_error = $3, updated_at = now()
@@ -154,10 +207,30 @@ func (r *Repo) MarkRetry(ctx context.Context, id int64, next time.Time, lastErr 
 	return err
 }
 
-// MarkFailed помечает уведомление окончательно неуспешным.
-func (r *Repo) MarkFailed(ctx context.Context, id int64, lastErr string) error {
+// ListUnpublished возвращает до limit неопубликованных строк outbox по порядку (FIFO).
+func (r *Repo) ListUnpublished(ctx context.Context, limit int) ([]OutboxRow, error) {
+	rows, err := r.pool.Query(ctx,
+		`SELECT id, topic, key, payload FROM outbox
+		 WHERE published_at IS NULL ORDER BY id LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []OutboxRow
+	for rows.Next() {
+		var o OutboxRow
+		if err := rows.Scan(&o.ID, &o.Topic, &o.Key, &o.Payload); err != nil {
+			return nil, err
+		}
+		out = append(out, o)
+	}
+	return out, rows.Err()
+}
+
+// MarkPublished помечает строку outbox опубликованной.
+func (r *Repo) MarkPublished(ctx context.Context, id int64) error {
 	_, err := r.pool.Exec(ctx,
-		`UPDATE notifications SET status = 'failed', last_error = $2, updated_at = now()
-		 WHERE id = $1`, id, lastErr)
+		`UPDATE outbox SET published_at = now() WHERE id = $1`, id)
 	return err
 }

@@ -5,8 +5,9 @@
 HTTP_ADDR      ?= :8080
 DATABASE_URL   ?= postgres://notif:notif@localhost:5433/notifications?sslmode=disable
 MIGRATIONS_DIR ?= migrations
-KAFKA_BROKERS  ?= localhost:9092
-KAFKA_TOPIC    ?= order.events
+KAFKA_BROKERS      ?= localhost:9092
+KAFKA_TOPIC        ?= order.events
+KAFKA_STATUS_TOPIC ?= notification.status
 
 .PHONY: help
 help: ## Показать список команд
@@ -32,10 +33,13 @@ kafka-up: ## Поднять Kafka в docker и дождаться готовно
 	@echo "Kafka готова"
 
 .PHONY: kafka-topic
-kafka-topic: ## Создать топик order-событий (идемпотентно)
+kafka-topic: ## Создать топики order-событий и статусов (идемпотентно)
 	docker compose exec -T kafka /opt/kafka/bin/kafka-topics.sh \
 		--bootstrap-server localhost:9092 --create --if-not-exists \
 		--topic $(KAFKA_TOPIC) --partitions 3 --replication-factor 1
+	docker compose exec -T kafka /opt/kafka/bin/kafka-topics.sh \
+		--bootstrap-server localhost:9092 --create --if-not-exists \
+		--topic $(KAFKA_STATUS_TOPIC) --partitions 3 --replication-factor 1
 
 .PHONY: infra-up
 infra-up: db-up kafka-up kafka-topic ## Поднять базу и Kafka, создать топик
@@ -44,6 +48,7 @@ infra-up: db-up kafka-up kafka-topic ## Поднять базу и Kafka, соз
 run: infra-up ## Поднять инфру и запустить сервер
 	HTTP_ADDR=$(HTTP_ADDR) DATABASE_URL=$(DATABASE_URL) \
 	KAFKA_BROKERS=$(KAFKA_BROKERS) KAFKA_TOPIC=$(KAFKA_TOPIC) \
+	KAFKA_STATUS_TOPIC=$(KAFKA_STATUS_TOPIC) \
 	go run ./cmd/notification-service
 
 .PHONY: migrate-up

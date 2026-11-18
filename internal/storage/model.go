@@ -33,3 +33,11 @@ type Notification struct {
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
 }
+
+// OutboxRow — неопубликованная запись transactional outbox: что и куда отдать в Kafka.
+type OutboxRow struct {
+	ID      int64
+	Topic   string
+	Key     string
+	Payload []byte // jsonb
+}
