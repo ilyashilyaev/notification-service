@@ -5,8 +5,6 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/twmb/franz-go/pkg/kgo"
-
 	"github.com/ilyashilyaev/notification-service/internal/storage"
 )
 
@@ -16,15 +14,15 @@ import (
 // потом MarkPublished) даёт at-least-once: при сбое строка опубликуется повторно,
 // но не потеряется.
 type Relay struct {
-	client    *kgo.Client
+	pub       Publisher
 	repo      *storage.Repo
 	log       *slog.Logger
 	batchSize int
 	pollEvery time.Duration
 }
 
-func NewRelay(client *kgo.Client, repo *storage.Repo, log *slog.Logger) *Relay {
-	return &Relay{client: client, repo: repo, log: log, batchSize: 100, pollEvery: time.Second}
+func NewRelay(pub Publisher, repo *storage.Repo, log *slog.Logger) *Relay {
+	return &Relay{pub: pub, repo: repo, log: log, batchSize: 100, pollEvery: time.Second}
 }
 
 // Run крутит слив outbox, пока не отменят ctx (по отмене возвращает nil).
@@ -62,8 +60,7 @@ func (r *Relay) Run(ctx context.Context) error {
 		// порядок важен, пропускать нельзя (следующая итерация начнёт с той же строки).
 		var published []storage.OutboxRow
 		for _, row := range rows {
-			rec := &kgo.Record{Topic: row.Topic, Key: []byte(row.Key), Value: row.Payload}
-			if err := r.client.ProduceSync(ctx, rec).FirstErr(); err != nil {
+			if err := r.pub.Publish(ctx, row.Topic, row.Key, row.Payload); err != nil {
 				r.log.Error("failed to publish event", "err", err)
 				break
 			}

@@ -80,7 +80,7 @@ func run(logger *slog.Logger) error {
 	srv := server.New(addr, logger, repo, channels)
 	wrk := worker.New(repo, channels, logger, worker.Config{StatusTopic: kcfg.StatusTopic})
 	consumer := events.NewConsumer(kclient, repo, channelNames, logger)
-	relay := events.NewRelay(producer, repo, logger)
+	relay := events.NewRelay(events.NewKafkaPublisher(producer), repo, logger)
 
 	// errgroup: все компоненты живут, пока жив gctx; падение или отмена одного
 	// отменяет gctx -> остальные тоже корректно останавливаются. g.Wait ждёт всех.

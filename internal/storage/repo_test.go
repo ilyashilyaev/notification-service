@@ -26,7 +26,7 @@ func testRepo(t *testing.T) *Repo {
 	}
 	t.Cleanup(pool.Close)
 
-	if _, err := pool.Exec(ctx, "TRUNCATE notifications, events RESTART IDENTITY CASCADE"); err != nil {
+	if _, err := pool.Exec(ctx, "TRUNCATE notifications, events, outbox RESTART IDENTITY CASCADE"); err != nil {
 		t.Fatalf("truncate (миграции накатаны? make migrate-up): %v", err)
 	}
 	return NewRepo(pool)
