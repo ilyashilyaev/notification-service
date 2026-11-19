@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ilyashilyaev/notification-service/internal/metrics"
 	"github.com/ilyashilyaev/notification-service/internal/notify"
 	"github.com/ilyashilyaev/notification-service/internal/storage"
 )
@@ -121,6 +122,7 @@ func (w *Worker) Run(ctx context.Context) error {
 func (w *Worker) process(ctx context.Context, n storage.Notification) {
 	ch, ok := w.channels[n.Channel]
 	if !ok {
+		metrics.NotificationsProcessed.WithLabelValues(n.Channel, "failed").Inc()
 		if err := w.repo.MarkFailed(ctx, n, "unknown channel: "+n.Channel, w.cfg.StatusTopic); err != nil {
 			w.log.Error("unknown channel", "channel", n.Channel)
 		}
@@ -128,17 +130,20 @@ func (w *Worker) process(ctx context.Context, n storage.Notification) {
 	}
 	err := ch.Send(ctx, n)
 	if err == nil {
+		metrics.NotificationsProcessed.WithLabelValues(n.Channel, "sent").Inc()
 		if err := w.repo.MarkSent(ctx, n, w.cfg.StatusTopic); err != nil {
 			w.log.Error("mark sent", "err", err)
 		}
 		return
 	}
 	if n.Attempts >= w.cfg.MaxAttempts {
+		metrics.NotificationsProcessed.WithLabelValues(n.Channel, "failed").Inc()
 		if e := w.repo.MarkFailed(ctx, n, err.Error(), w.cfg.StatusTopic); e != nil {
 			w.log.Error("failed to mark failed attempt", "channel", n.Channel, "err", e)
 		}
 	} else {
 		next := time.Now().Add(w.backoff(n.Attempts))
+		metrics.NotificationsProcessed.WithLabelValues(n.Channel, "retry").Inc()
 		if e := w.repo.MarkRetry(ctx, n.ID, next, err.Error()); e != nil {
 			w.log.Error("failed to mark retry", "channel", n.Channel, "err", e)
 		}

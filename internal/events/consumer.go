@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/ilyashilyaev/notification-service/internal/metrics"
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/ilyashilyaev/notification-service/internal/storage"
@@ -88,7 +89,10 @@ func (c *Consumer) handle(ctx context.Context, rec *kgo.Record) error {
 		return fmt.Errorf("ingest event %s: %w", oe.EventID, err)
 	}
 	if !created {
+		metrics.EventsIngested.WithLabelValues("kafka", "duplicate").Inc()
 		c.log.Info("duplicate event skipped", "event_id", oe.EventID)
+		return nil
 	}
+	metrics.EventsIngested.WithLabelValues("kafka", "created").Inc()
 	return nil
 }

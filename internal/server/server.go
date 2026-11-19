@@ -7,10 +7,13 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 
+	"github.com/ilyashilyaev/notification-service/internal/metrics"
 	"github.com/ilyashilyaev/notification-service/internal/notify"
 	"github.com/ilyashilyaev/notification-service/internal/storage"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // Server оборачивает http.Server с маршрутами сервиса.
@@ -27,15 +30,49 @@ func New(addr string, log *slog.Logger, repo *storage.Repo, channels []notify.Ch
 }
 
 // routes возвращает обработчики.
+//
+// Два mux: прикладные маршруты (app) оборачиваем в withMetrics, а /metrics
+// монтируем в root БЕЗ обёртки — иначе сам опрос метрик попадал бы в счётчики.
 func (s *Server) routes() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+	app := http.NewServeMux()
+	app.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
-	mux.HandleFunc("POST /events", s.handleCreateEvent)
-	return mux
+	app.HandleFunc("POST /events", s.handleCreateEvent)
+
+	root := http.NewServeMux()
+	// /metrics монтируем без withMetrics-обёртки: опрос метрик себя не считает.
+	root.Handle("/metrics", promhttp.Handler())
+	root.Handle("/", withMetrics(app))
+	return root
+}
+
+// responseRecorder запоминает код ответа: http.ResponseWriter его не отдаёт,
+// а для лейбла "status" метрики он нужен. Перехватываем WriteHeader.
+// (Аналог в Rack — обёртка, читающая status из ответа middleware.)
+type responseRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *responseRecorder) WriteHeader(code int) {
+	r.status = code
+	r.ResponseWriter.WriteHeader(code)
+}
+
+// withMetrics — middleware: считает запросы и меряет длительность.
+// r.Pattern (а не r.URL.Path) — шаблон маршрута ("POST /events"), чтобы лейбл
+// status/path не плодил бесконечные значения (cardinality).
+func withMetrics(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rec := &responseRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rec, r)
+		metrics.HTTPDuration.WithLabelValues(r.Pattern, r.Method).Observe(time.Since(start).Seconds())
+		metrics.HTTPRequests.WithLabelValues(r.Pattern, r.Method, strconv.Itoa(rec.status)).Inc()
+	})
 }
 
 // createEventRequest — тело POST /events.
@@ -82,9 +119,11 @@ func (s *Server) handleCreateEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !created {
+		metrics.EventsIngested.WithLabelValues("http", "duplicate").Inc()
 		writeJSON(w, http.StatusOK, map[string]any{"status": "duplicate", "event_id": reg.EventID})
 		return
 	}
+	metrics.EventsIngested.WithLabelValues("http", "created").Inc()
 	writeJSON(w, http.StatusCreated, map[string]any{"event": ev, "notifications": notes})
 }
 

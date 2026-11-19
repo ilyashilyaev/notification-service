@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/ilyashilyaev/notification-service/internal/metrics"
 	"github.com/ilyashilyaev/notification-service/internal/storage"
 )
 
@@ -71,7 +72,11 @@ func (r *Relay) Run(ctx context.Context) error {
 		for _, row := range published {
 			if err := r.repo.MarkPublished(ctx, row.ID); err != nil {
 				r.log.Error("failed to mark event published", "err", err)
+				continue
 			}
+			// Считаем здесь (после успешного MarkPublished), а не сразу после Publish:
+			// метрика должна отражать реально зафиксированную публикацию.
+			metrics.OutboxPublished.Inc()
 		}
 	}
 }
