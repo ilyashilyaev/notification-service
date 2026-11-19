@@ -3,11 +3,13 @@
 # Адрес HTTP-сервера и строка подключения к БД.
 # Значения по умолчанию совпадают с docker-compose.yml.
 HTTP_ADDR      ?= :8080
+GRPC_ADDR      ?= :9090
 DATABASE_URL   ?= postgres://notif:notif@localhost:5433/notifications?sslmode=disable
 MIGRATIONS_DIR ?= migrations
 KAFKA_BROKERS      ?= localhost:9092
 KAFKA_TOPIC        ?= order.events
 KAFKA_STATUS_TOPIC ?= notification.status
+PROTO_DIR      ?= proto
 
 .PHONY: help
 help: ## Показать список команд
@@ -46,7 +48,7 @@ infra-up: db-up kafka-up kafka-topic ## Поднять базу и Kafka, соз
 
 .PHONY: run
 run: infra-up ## Поднять инфру и запустить сервер
-	HTTP_ADDR=$(HTTP_ADDR) DATABASE_URL=$(DATABASE_URL) \
+	HTTP_ADDR=$(HTTP_ADDR) GRPC_ADDR=$(GRPC_ADDR) DATABASE_URL=$(DATABASE_URL) \
 	KAFKA_BROKERS=$(KAFKA_BROKERS) KAFKA_TOPIC=$(KAFKA_TOPIC) \
 	KAFKA_STATUS_TOPIC=$(KAFKA_STATUS_TOPIC) \
 	go run ./cmd/notification-service
@@ -62,6 +64,14 @@ migrate-down: ## Откатить последнюю миграцию
 .PHONY: migrate-create
 migrate-create: ## Новая миграция: make migrate-create name=add_x
 	migrate create -ext sql -dir $(MIGRATIONS_DIR) -seq $(name)
+
+.PHONY: proto
+proto: ## Сгенерировать Go-код из .proto (нужны protoc + protoc-gen-go[-grpc] в GOPATH/bin)
+	PATH="$(shell go env GOPATH)/bin:$$PATH" protoc \
+		--proto_path=$(PROTO_DIR) \
+		--go_out=. --go_opt=module=github.com/ilyashilyaev/notification-service \
+		--go-grpc_out=. --go-grpc_opt=module=github.com/ilyashilyaev/notification-service \
+		$(PROTO_DIR)/notification/v1/notification.proto
 
 .PHONY: build
 build: ## Собрать бинарник в ./bin

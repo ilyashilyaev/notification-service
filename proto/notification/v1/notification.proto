@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+package notification.v1;
+
+option go_package = "github.com/ilyashilyaev/notification-service/internal/pb/notificationv1;notificationv1";
+
+// NotificationService — запрос статуса уведомления (read-only).
+service NotificationService {
+  // GetNotificationStatus возвращает текущий статус уведомления по его id.
+  rpc GetNotificationStatus(GetNotificationStatusRequest) returns (GetNotificationStatusResponse);
+}
+
+message GetNotificationStatusRequest {
+  int64 id = 1;
+}
+
+message GetNotificationStatusResponse {
+  int64 id = 1;
+  int64 event_id = 2;
+  string channel = 3;
+  string status = 4; // pending | sent | failed
+  int32 attempts = 5;
+  string last_error = 6;
+}

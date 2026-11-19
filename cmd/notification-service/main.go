@@ -15,6 +15,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/ilyashilyaev/notification-service/internal/events"
+	"github.com/ilyashilyaev/notification-service/internal/grpcsrv"
 	"github.com/ilyashilyaev/notification-service/internal/notify"
 	"github.com/ilyashilyaev/notification-service/internal/postgres"
 	"github.com/ilyashilyaev/notification-service/internal/server"
@@ -35,6 +36,10 @@ func run(logger *slog.Logger) error {
 	addr := os.Getenv("HTTP_ADDR")
 	if addr == "" {
 		addr = ":8080"
+	}
+	grpcAddr := os.Getenv("GRPC_ADDR")
+	if grpcAddr == "" {
+		grpcAddr = ":9090"
 	}
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
@@ -81,6 +86,7 @@ func run(logger *slog.Logger) error {
 	wrk := worker.New(repo, channels, logger, worker.Config{StatusTopic: kcfg.StatusTopic})
 	consumer := events.NewConsumer(kclient, repo, channelNames, logger)
 	relay := events.NewRelay(events.NewKafkaPublisher(producer), repo, logger)
+	grpcSrv := grpcsrv.New(grpcAddr, repo, logger)
 
 	// errgroup: все компоненты живут, пока жив gctx; падение или отмена одного
 	// отменяет gctx -> остальные тоже корректно останавливаются. g.Wait ждёт всех.
@@ -89,5 +95,6 @@ func run(logger *slog.Logger) error {
 	g.Go(func() error { return wrk.Run(gctx) })
 	g.Go(func() error { return consumer.Run(gctx) })
 	g.Go(func() error { return relay.Run(gctx) })
+	g.Go(func() error { return grpcSrv.Run(gctx) })
 	return g.Wait()
 }
