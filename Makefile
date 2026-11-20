@@ -9,6 +9,7 @@ MIGRATIONS_DIR ?= migrations
 KAFKA_BROKERS      ?= localhost:9092
 KAFKA_TOPIC        ?= order.events
 KAFKA_STATUS_TOPIC ?= notification.status
+REDIS_ADDR     ?= localhost:6379
 PROTO_DIR      ?= proto
 
 .PHONY: help
@@ -43,14 +44,21 @@ kafka-topic: ## Создать топики order-событий и статус
 		--bootstrap-server localhost:9092 --create --if-not-exists \
 		--topic $(KAFKA_STATUS_TOPIC) --partitions 3 --replication-factor 1
 
+.PHONY: redis-up
+redis-up: ## Поднять Redis в docker и дождаться готовности
+	docker compose up -d redis
+	@echo "ждём, пока Redis примет подключения..."
+	@until docker compose exec -T redis redis-cli ping >/dev/null 2>&1; do sleep 0.5; done
+	@echo "Redis готов"
+
 .PHONY: infra-up
-infra-up: db-up kafka-up kafka-topic ## Поднять базу и Kafka, создать топик
+infra-up: db-up kafka-up kafka-topic redis-up ## Поднять базу, Kafka и Redis, создать топик
 
 .PHONY: run
 run: infra-up ## Поднять инфру и запустить сервер
 	HTTP_ADDR=$(HTTP_ADDR) GRPC_ADDR=$(GRPC_ADDR) DATABASE_URL=$(DATABASE_URL) \
 	KAFKA_BROKERS=$(KAFKA_BROKERS) KAFKA_TOPIC=$(KAFKA_TOPIC) \
-	KAFKA_STATUS_TOPIC=$(KAFKA_STATUS_TOPIC) \
+	KAFKA_STATUS_TOPIC=$(KAFKA_STATUS_TOPIC) REDIS_ADDR=$(REDIS_ADDR) \
 	go run ./cmd/notification-service
 
 .PHONY: migrate-up

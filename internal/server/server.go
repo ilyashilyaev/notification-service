@@ -6,12 +6,15 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"math"
+	"net"
 	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/ilyashilyaev/notification-service/internal/metrics"
 	"github.com/ilyashilyaev/notification-service/internal/notify"
+	"github.com/ilyashilyaev/notification-service/internal/ratelimit"
 	"github.com/ilyashilyaev/notification-service/internal/storage"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -22,11 +25,13 @@ type Server struct {
 	log      *slog.Logger
 	repo     *storage.Repo
 	channels []notify.Channel
+	limiter  *ratelimit.Limiter // nil = лимит выключен (напр. в тестах)
 }
 
-// New собирает сервер со всеми зависимостями.
-func New(addr string, log *slog.Logger, repo *storage.Repo, channels []notify.Channel) *Server {
-	return &Server{addr: addr, log: log, repo: repo, channels: channels}
+// New собирает сервер со всеми зависимостями. limiter может быть nil —
+// тогда rate limit на POST /events не навешивается.
+func New(addr string, log *slog.Logger, repo *storage.Repo, channels []notify.Channel, limiter *ratelimit.Limiter) *Server {
+	return &Server{addr: addr, log: log, repo: repo, channels: channels, limiter: limiter}
 }
 
 // routes возвращает обработчики.
@@ -40,7 +45,13 @@ func (s *Server) routes() http.Handler {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
-	app.HandleFunc("POST /events", s.handleCreateEvent)
+	// POST /events — под пер-юзер rate limit (когда лимитер есть). Оборачиваем
+	// только этот маршрут: /healthz и /metrics лимитировать не нужно.
+	var createEvent http.Handler = http.HandlerFunc(s.handleCreateEvent)
+	if s.limiter != nil {
+		createEvent = s.withRateLimit(createEvent)
+	}
+	app.Handle("POST /events", createEvent)
 
 	root := http.NewServeMux()
 	// /metrics монтируем без withMetrics-обёртки: опрос метрик себя не считает.
@@ -72,6 +83,42 @@ func withMetrics(next http.Handler) http.Handler {
 		next.ServeHTTP(rec, r)
 		metrics.HTTPDuration.WithLabelValues(r.Pattern, r.Method).Observe(time.Since(start).Seconds())
 		metrics.HTTPRequests.WithLabelValues(r.Pattern, r.Method, strconv.Itoa(rec.status)).Inc()
+	})
+}
+
+// userKey определяет «пользователя» для rate limit: заголовок X-User-ID, а если
+// его нет — IP клиента (чтобы анонимные клиенты тоже лимитировались). Префиксы
+// "user:"/"ip:" разводят пространства ключей, чтобы id "1.2.3.4" из заголовка не
+// совпал с IP-ключом.
+func userKey(r *http.Request) string {
+	if uid := r.Header.Get("X-User-ID"); uid != "" {
+		return "ratelimit:user:" + uid
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr // без порта — берём как есть
+	}
+	return "ratelimit:ip:" + host
+}
+
+// withRateLimit — middleware пер-юзер лимита на POST /events. Спрашивает у
+// s.limiter, можно ли пропустить запрос; при отказе отдаёт 429 с Retry-After.
+// Ошибку лимитера не роняем наружу (fail-open): приём событий важнее лимита.
+func (s *Server) withRateLimit(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		key := userKey(r)
+		allowed, retryAfter, err := s.limiter.Allow(r.Context(), key)
+		if err != nil {
+			s.log.Error("rate limit check failed", "error", err)
+			next.ServeHTTP(w, r)
+			return
+		}
+		if !allowed {
+			w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(retryAfter.Seconds()))))
+			writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
+			return
+		}
+		next.ServeHTTP(w, r)
 	})
 }
 

@@ -10,7 +10,9 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 
@@ -18,6 +20,7 @@ import (
 	"github.com/ilyashilyaev/notification-service/internal/grpcsrv"
 	"github.com/ilyashilyaev/notification-service/internal/notify"
 	"github.com/ilyashilyaev/notification-service/internal/postgres"
+	"github.com/ilyashilyaev/notification-service/internal/ratelimit"
 	"github.com/ilyashilyaev/notification-service/internal/server"
 	"github.com/ilyashilyaev/notification-service/internal/storage"
 	"github.com/ilyashilyaev/notification-service/internal/worker"
@@ -44,6 +47,19 @@ func run(logger *slog.Logger) error {
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
 		dsn = "postgres://notif:notif@localhost:5433/notifications?sslmode=disable"
+	}
+	redisAddr := os.Getenv("REDIS_ADDR")
+	if redisAddr == "" {
+		redisAddr = "localhost:6379"
+	}
+	// Лимит POST /events на пользователя: RATE_LIMIT запросов за RATE_WINDOW.
+	rateLimit := 100
+	if v, err := strconv.Atoi(os.Getenv("RATE_LIMIT")); err == nil && v > 0 {
+		rateLimit = v
+	}
+	rateWindow := time.Minute
+	if v, err := time.ParseDuration(os.Getenv("RATE_WINDOW")); err == nil && v > 0 {
+		rateWindow = v
 	}
 
 	// Ctrl+C / SIGTERM отменяют ctx -> сервер уходит в graceful shutdown.
@@ -77,12 +93,19 @@ func run(logger *slog.Logger) error {
 	}
 	defer producer.Close()
 
+	rdb, err := ratelimit.NewClient(ctx, redisAddr)
+	if err != nil {
+		return fmt.Errorf("connect redis: %w", err)
+	}
+	defer func() { _ = rdb.Close() }()
+	limiter := ratelimit.New(rdb, rateLimit, rateWindow)
+
 	channelNames := make([]string, len(channels))
 	for i, ch := range channels {
 		channelNames[i] = ch.Name()
 	}
 
-	srv := server.New(addr, logger, repo, channels)
+	srv := server.New(addr, logger, repo, channels, limiter)
 	wrk := worker.New(repo, channels, logger, worker.Config{StatusTopic: kcfg.StatusTopic})
 	consumer := events.NewConsumer(kclient, repo, channelNames, logger)
 	relay := events.NewRelay(events.NewKafkaPublisher(producer), repo, logger)

@@ -23,7 +23,7 @@ func discardLogger() *slog.Logger {
 
 // GET /healthz не трогает БД — хватает сервера без зависимостей.
 func TestHealthz(t *testing.T) {
-	srv := New(":0", discardLogger(), nil, nil)
+	srv := New(":0", discardLogger(), nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	rec := httptest.NewRecorder()
@@ -54,7 +54,7 @@ func realServer(t *testing.T) (*Server, *pgxpool.Pool) {
 
 	log := discardLogger()
 	channels := []notify.Channel{notify.NewEmailChannel(log), notify.NewPushChannel(log)}
-	return New(":0", log, storage.NewRepo(pool), channels), pool
+	return New(":0", log, storage.NewRepo(pool), channels, nil), pool
 }
 
 // POST /events создаёт событие и по уведомлению на каждый канал (email + push => 2).
